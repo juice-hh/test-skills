@@ -1,6 +1,7 @@
 ---
 name: qa-orchestrator
 description: |
+  在原版基础上新增：.env 环境变量检查、Playwright 工程配置最佳实践建议、移动端测试支持。
   QA 全链路编排器。串联测试设计、执行、覆盖审查三个阶段，形成完整闭环：
   test-case-designer → tdd-guide → e2e-runner → test-coverage-reviewer。
   Use when: "运行完整 QA 流程"、"qa 全链路"、"端到端测试流程"、"从测试计划到覆盖报告"、
@@ -64,6 +65,12 @@ QA 全链路编排器。不做具体测试工作，只负责按正确顺序调�
     └── coverage/
         └── coverage-report.md          ← test-coverage-reviewer 的输出
 ```
+ 
+移动端测试文件放在 `tests/e2e/` 下，文件名加 `-mobile` 后缀，例如：
+```
+tests/e2e/01-auth-login-mobile.spec.ts
+tests/e2e/02-repair-request-submit-mobile.spec.ts
+```
 
 ---
 
@@ -83,6 +90,7 @@ QA 全链路编排器。不做具体测试工作，只负责按正确顺序调�
 ```
 tests/smoke/01-auth-login.spec.ts
 tests/e2e/02-repair-request-submit.spec.ts
+tests/e2e/02-repair-request-submit-mobile.spec.ts   ← 移动端对应文件
 tests/api/03-work-order-status.spec.ts
 tests/edge/04-permission-unauthorized.spec.ts
 ```
@@ -117,6 +125,65 @@ ls specs/*.md 2>/dev/null || echo "SPECS_EMPTY"
 ```bash
 mkdir -p specs tests/smoke tests/e2e tests/api tests/edge qa/coverage
 ```
+ 
+### .env 环境变量检查（新增）
+ 
+```bash
+# 检查 .env 文件是否存在
+[ -f .env ] || echo "ENV_FILE_MISSING"
+ 
+# 验证必需变量
+for var in BASE_URL API_BASE; do
+  grep -q "^${var}=" .env 2>/dev/null || echo "MISSING_VAR: ${var}"
+done
+```
+ 
+**处理规则**：
+- `.env` 不存在 → 停止，提示用户复制 `.env.example` 并填写实际值
+- `BASE_URL` 缺失 → 停止，浏览器测试无法确定页面根地址
+- `API_BASE` 缺失 → 停止，API 测试无法确定接口根路径
+- 其他变量（如 `MOCK_LOGIN_URL`）缺失 → 警告，但不阻止流程（项目可能用其他认证方式）
+
+---
+
+## 工程配置最佳实践
+ 
+在开始测试设计前，检查项目是否已有 Playwright 配置文件：
+ 
+```bash
+ls playwright.config.js playwright.config.ts e2e/playwright.config.js e2e/playwright.config.ts 2>/dev/null \
+  || echo "CONFIG_NOT_FOUND"
+```
+ 
+**如果不存在**，按以下推荐值生成 `playwright.config.js`：
+ 
+| 配置项 | 推荐值 | 原因 |
+|--------|--------|------|
+| `timeout` | `60000` | 单条用例最长 60 秒，应对慢接口 |
+| `retries` | `1` | 失败自动重试一次，应对网络抖动 |
+| `workers` | `1` | 串行执行，避免并发登录 session 冲突 |
+| `screenshot` | `'only-on-failure'` | 失败时自动截图，存入 `test-results/` |
+| `trace` | `'on-first-retry'` | 首次重试时录制操作 trace，便于排查 |
+| PC 视口 | `1440 × 900` | 桌面端标准分辨率 |
+| 移动端视口 | `375 × 812` | iPhone 尺寸，用于移动端测试 project |
+ 
+**如果已存在**，不自动修改，仅提示用户对照以上推荐值检查，尤其确认 `workers: 1` 和 `retries: 1` 是否设置。
+ 
+### Mock 登录模式（推荐）
+ 
+优先使用 Mock 登录接口获取认证 Cookie，而不是驱动登录页面 UI，原因：
+- 速度更快（无需等待登录页渲染和交互）
+- 不受登录页 UI 改版影响，测试更稳定
+- API 测试和浏览器测试可共用同一套认证逻辑
+如果项目提供 mock 登录接口，建议在 `auth/login.js`（或 `auth/login.ts`）中封装：
+ 
+```js
+// auth/login.js 推荐结构
+async function mockLogin({ agent = 'PC' } = {}) { ... }   // 返回 { cookieHeader, cookies }
+async function injectCookies(context, cookies) { ... }     // 注入浏览器 context
+```
+ 
+各测试文件在 `test.beforeAll` 中统一调用，不在每条用例中重复登录。
 
 ---
 
@@ -161,6 +228,7 @@ mkdir -p specs tests/smoke tests/e2e tests/api tests/edge qa/coverage
 ## Frontend Cases
 ## API Cases
 ## Edge Cases
+## Mobile Cases（如果模块需要移动端测试）
 ## Out of Scope
 ## Recommended First Batch
 ```
@@ -184,6 +252,33 @@ mkdir -p specs tests/smoke tests/e2e tests/api tests/edge qa/coverage
 
 **不生成全部测试**，先跑通 Recommended First Batch 再扩展。
 
+#### 移动端测试（可选）
+ 
+如果 `specs/NN-*-test-plan.md` 中包含 `## Mobile Cases`，在生成对应 e2e 测试时同步生成移动端版本：
+ 
+```ts
+// tests/e2e/01-auth-login-mobile.spec.ts
+// Source: specs/01-auth-test-plan.md — Mobile Cases
+ 
+test.beforeAll(async ({ browser }) => {
+  const auth = await mockLogin({ agent: 'MOBILE' });
+  context = await browser.newContext({
+    viewport: { width: 375, height: 812 },
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) ...',
+    isMobile: true,
+  });
+  await injectCookies(context, auth.cookies);
+  page = await context.newPage();
+});
+```
+ 
+**约定**：
+- 移动端测试文件名加 `-mobile` 后缀，放在 `tests/e2e/` 下
+- `mockLogin({ agent: 'MOBILE' })` 获取移动端 cookie
+- `newContext` 中配置 `viewport: { width: 375, height: 812 }`、`isMobile: true`、对应 UA
+- 移动端测试只验证移动端特有的交互和布局，不重复 PC 端已有的业务逻辑断言
+如果项目不需要移动端测试，跳过此节，不生成 `-mobile` 文件。
+
 ### Step 2b — code-reviewer 审查测试代码
 
 调用 `code-reviewer` 对生成的测试文件做 review：
@@ -204,11 +299,17 @@ mkdir -p specs tests/smoke tests/e2e tests/api tests/edge qa/coverage
 调用 `e2e-runner` 执行 Playwright 测试：
 
 ```bash
-# 运行全部测试
-npx playwright test --reporter=json,html
+# 运行全部测试（含移动端）
+npx playwright test --reporter=json,html 
 
 # 只运行某个模块
 npx playwright test tests/ --grep "01-auth" --reporter=json
+
+# 只运行 PC 端测试（排除移动端）
+npx playwright test tests/ --grep-invert "mobile" --reporter=json
+
+# 只运行移动端测试
+npx playwright test tests/e2e/ --grep "mobile" --reporter=json
 
 # 只运行某个层次
 npx playwright test tests/smoke/ --reporter=json
@@ -285,6 +386,8 @@ reviewer 逐模块对照 `NN-*-test-plan.md` 检查，输出到 `qa/coverage/cov
 - 不要在 Step 3 超过 50% 失败时强行进入 Step 4
 - 不要修改 `specs/` 下任何文件（那是 test-case-designer 的职责）
 - 不要打乱编号顺序，新增模块取当前最大编号 +1
+- 不要在 `.env` 缺失关键变量时继续执行测试（会得到误导性结果）
+- 不要强制修改已有的 `playwright.config`，只提示对照检查
 
 **新增模块时**：
 ```bash
@@ -298,13 +401,14 @@ ls specs/[0-9]*.md | sort | tail -1  # 查找当前最大编号
 
 ```
 qa-orchestrator
-├── Step 1 → test-case-designer   (生成 specs/NN-*.md)
-├── Step 2 → tdd-guide            (测试先行，生成 tests/NN-*.spec.ts)
+├── Step 0 → 环境检查（Playwright + .env 变量 + 工程配置建议）
+├── Step 1 → test-case-designer   (生成 specs/NN-*.md，含可选 Mobile Cases)
+├── Step 2 → tdd-guide            (测试先行，生成 tests/NN-*.spec.ts + *-mobile.spec.ts)
 │         → code-reviewer         (审查测试代码质量)
-├── Step 3 → e2e-runner           (执行 Playwright 测试)
+├── Step 3 → e2e-runner           (执行 Playwright 测试，支持 --grep "mobile" 过滤)
 │         → build-error-resolver  (失败时修复构建错误，最小 diff)
 └── Step 4 → test-coverage-reviewer (读取 specs/ + tests/ + test-results/)
-
+ 
 可选（不在主链路）：
          → security-reviewer      (Step 2 后，选择性插入)
          → refactor-cleaner       (发现大量冗余测试后手动调用)
